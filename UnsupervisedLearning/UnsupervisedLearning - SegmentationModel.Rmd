@@ -1,0 +1,1167 @@
+
+---
+title: "Aprendizaje No Supervisado - Práctica Evaluable"
+author: "Guillermo García Fernández. garciafernandezguillermo@gmail.com"
+date: "11 Septiembre 2020"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+  html_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: yes
+      smoth_scroll: yes
+---
+
+<style>
+.main-container { width: 1200px; max-width:2800px;}
+pre {
+  overflow-x: auto;
+}
+pre code {
+  word-wrap: normal;
+  white-space: pre;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+require("knitr")
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Objetivo
+
+Considere el dataset proporcionado que contiene información sobre distintos sensores corporales y cuyo objetivo es predecir la postura corporal durante la realización de un ejercicio. Los distintos tipos de posturas están codificados en una variable llamada classe con las letras de la A a la E, representando, respectivamente:
+
+- A: postura correcta en la realización del ejercicio.
+- B-E: distintos errores típicos durante la realización del ejercicio.
+
+Como vamos a tratar el problema como uno de aprendizaje no supervisado, es conveniente asegurarse de no incluir el atributo de clase entre las características con las que se entrene el modelo
+
+El ejercicio consiste, por tanto, en construir un modelo de segmentación que intente capturar la estructura de grupos existente en el conjunto de datos original.
+
+Se sugiere un rápido análisis exploratorio del conjunto de datos para determinar si:
+
+- Existen variables que haya que descartar por ser identificadores (o asimilables a identificadores) o que no aporten información útil para resolver el problema.
+- Existen variables con demasiados valores nulos como para poder ser utilizadas.
+- Existen variables con valores en distintos órdenes de magnitud, circunstancia que podría afectar al rendimiento de determinados modelos.
+
+Aparte de lo anterior, conviene explorar la posibilidad de usar distintos modelos de aprendizaje, que pueden ser comparados de acuerdo con alguna métrica de calidad. En este caso, y dado que se dispone de las etiquetas reales de los datos, se podría usar una métrica de evaluación externa. En cualquier caso, y al tratarse de un conjunto de datos de un volumen no despreciable, se recomienda cuidado al calcular muchas métricas de evaluación, ya que algunas pueden tardar mucho tiempo en calcularse. Con el objetivo de cubrir el proceso total de análisis de un problema de estas características, se recomienda calcular sólo una o dos, aunque en un escenario real, tal y como vimos en clase, podría ser recomendable calcular más.
+
+
+# Importación de librerías y datos
+
+## Librerías
+
+```{r, message=FALSE}
+ 
+library(corrplot) # Matriz de correlaciones
+library(clusterSim)
+library(tidyverse) # Cargo tidyverse después de clusterSim porque el paquete Mass de clusterSim masks 'dplyr::select()'
+
+library(fpc)
+library(factoextra)
+library(NbClust)
+library(caret)
+library(cluster)
+library(mclust)
+library(dbscan)
+
+library(ggplot2)
+library(plotly)
+```
+
+## Datos
+
+Importamos los datos y visualizamos una muestra.
+```{r, message=FALSE}
+df <- read_csv("../data/datos_train.csv")
+knitr::kable(head(df))
+```
+
+# Auditoría de datos
+
+Observamos el tamaño del conjunto de datos y su estructura.
+
+Número de filas (instancias):
+```{r}
+nrow(df)
+```
+
+Número de columnas (variables):
+```{r}
+ncol(df)
+```
+
+Información y estructura del dataframe
+```{r}
+str(df)
+```
+
+
+Valores de la variable target
+```{r}
+unique(df$classe)
+```
+
+## Estadísticos
+
+Estudiamos los estadísticos básicos
+```{r}
+summary(df)
+```
+
+### Variables numéricas
+Observamos algunos problemas:
+
+- Las variables tienen magnitudes muy dispares. Adicionalmente, algunas toman valores negativos.
+- Existen variables con muchos valores nulos
+ 
+Trataremos estos problemas más adelante
+
+### Variables categóricas
+Observamos algunos problemas:
+
+- La variable user_name identifica el nombre del usuario. Debe ser descartada, no tiene valor predictivo.
+
+```{r}
+df$user_name <- NULL
+dim(df)
+```
+
+## Valores nulos
+
+Hemos detectado que los datos tienen columnas con demasiados nulos.
+Vamos a tratar esos casos.
+
+```{r}
+colSums(is.na.data.frame(df))
+```
+
+Las 100 columnas identificadas contienen demasiados nulos. Las eliminamos.
+```{r}
+cols_var_nulo <- colnames(df)[colSums(is.na(df)) > 0]
+
+df <- df[, !colnames(df) %in% cols_var_nulo]
+dim(df)
+```
+
+## Análisis de coherencia
+
+### Variables duplicadas
+
+No existen variables duplicadas
+```{r}
+sum(duplicated(t(df)))
+```
+
+### Registros duplicados
+
+No existen registros duplicados
+```{r}
+sum(duplicated(df))
+```
+
+### Campos/variables con un único valor
+
+No existen campos que tengan siempre un mismo valor.
+```{r}
+sum(
+  sapply(df, function(x) length(unique(x)) == 1)
+)
+```
+
+# Análisis Exploratorio de Datos. 
+
+## Visualizaciones
+
+### Variables continuas
+
+Analicemos las variables numéricas. Para ello utilizamos histogramas y boxplots.
+```{r}
+varNumericas <- names(df[sapply(df, class) == "numeric"])
+
+
+par(mfrow=c(5,2), mar = c(2,0,2,2))
+for (var in varNumericas){
+  boxplot(df[[var]], horizontal=TRUE, outline=TRUE, col = "green3", main = var)
+  hist(df[[var]], main = var, col = "pink2") 
+}
+
+```
+
+En general, observamos distribuciones alejadas de la distribución normal: distribuciones multimodales (sobre todo bimodales y trimodales), distribuciones con largas colas, etc. Además, en algunas variables, observamos la presencia de valores atípicos.
+Esto puede afectar al rendimiento de algunos modelos, por lo que debemos tenerlo en cuenta.
+
+### Variables categóricas
+
+Para las variables categóricas realizamos diagramas de barras.
+
+```{r}
+varCategoricas <- names(df[sapply(df, class) == "character"])
+
+for (var in varCategoricas){
+  counts <- table(df[,var])
+  density <- counts / sum(counts)
+  print(paste("Distribución: ", var))
+  print(density)
+  barplot(density, main = paste("Gráfico de barras de: ", var), horiz = FALSE, col="lightblue3")
+}
+```
+
+Los datos reflejan cuatro fechas: dos a finales de Noviembre 2011, dos a principios de Diciembre 2011. La fecha exacta no es un buen predictor, por lo que más adelante trataremos este campo.
+
+Las clases están aproximadamente balanceadas, no nos enfrentamos a un problema de clases fuertemente desbalanceadas.
+
+## Matriz de correlaciones
+
+Estudiamos la correlación entre las variables. Para poder incluir la variable dependiente, que es de tipo categórico, le aplicamos una transformación dummy.
+```{r}
+class_unique_values <- levels(as.factor(df$classe))
+
+class_dummies <- data.frame(model.matrix(~classe, data = df))[ ,2:length(class_unique_values)]
+rm(class_unique_values) # eliminamos el objeto class_unique_values, ya no es necesario
+
+head(class_dummies)
+```
+
+La incluímos en el dataframe, que renombramos como df_dm
+```{r}
+df_dm <- df
+
+df_dm$classe <- NULL
+df_dm <- bind_cols(df_dm, class_dummies)
+rm(class_dummies) # eliminamos el objeto class_dummies, ya no es necesario
+
+tail(df_dm)
+```
+
+representamos la matriz de correlaciones
+```{r "data_correlation", fig.height = 8, fig.width = 8, message=FALSE}
+corrplot(
+  cor( df_dm[sapply(df_dm, class) == "numeric"] )
+)
+```
+
+Observamos que, en general, las variables independientes están débilmente correladas con la variable dependiente. 
+Por otro lado, algunas variables independientes están fuertemente correladas entre sí.
+
+# Creación y transformación de variables
+
+## Variables de fecha y tiempo
+
+La variable de fecha hora cvtd_timestamp está codificada en tiempo UNIX en los campos raw_timestamp_part_1 (parte entera del timestamp) y raw_timestamp_part_2 (parte decimal del timestamp). 
+
+Además, la fecha precisa no es buen predictor. Una opción sería extaer información útil como la hora, día de la semana, día del mes o mes para detectar patrones relevantes. Sin embargo, en nuestro dataset existen solamente 4 días registrados, y en cada día el intervalo horario es muy reducido.
+
+```{r}
+sort(
+  levels(as.factor(df$cvtd_timestamp))
+)
+```
+
+Por lo tanto, optamos por eliminar esta información:
+```{r}
+cols_to_delete <- c("cvtd_timestamp", "raw_timestamp_part_1", "raw_timestamp_part_2")
+
+df <- df[, !colnames(df) %in% cols_to_delete]
+df_dm <- df_dm[, !colnames(df_dm) %in% cols_to_delete]
+
+# alternativa:
+# df <- df %>% select(-cvtd_timestamp,-raw_timestamp_part_1,-raw_timestamp_part_2)
+
+dim(df)
+dim(df_dm)
+```
+
+# Exploración de modelos
+
+Eliminamos la etiqueta de datos para trabajar con un problema no supervisado. Normalizamos los datos.
+
+```{r}
+df_norm <- data.Normalization( data.frame(df[, 1:52]), "n4")  # n4 - unitization with zero minimum ((x-min)/range))
+head(df_norm)
+```
+
+Mantenemos una copia etiquetada de los datos normalizados, por si fuera necesaria más adelante.
+```{r}
+classe <- df$classe
+df_labelled_norm <- cbind(classe, df_norm)
+
+rm(classe) # eliminamos el objeto classe, ya no es necesario
+
+head(df_labelled_norm)
+```
+
+Recordemos que cada observación del dataset corresponde a una postura durante la realización de un ejercicio.
+El objetivo es construir y explorar modelos de segmentación que intenten capturar la estructura de grupos existente en el conjunto de datos.
+
+
+## Clustering Jerárquico (agglomerative clustering)
+
+Implementamos clustering jerárquico utilizando la función hclust(), que forma parte del paquete stats que se carga por defecto.
+
+Utilizamos la distancia de Ward, aunque es posible utilizar otro métodos como "single", "complete", "average", etc
+```{r}
+hclust.result <- hclust(dist(df_norm), method="ward.D")
+plot(hclust.result, labels=df_labelled_norm$classe) # añadimos etiquetas de classe
+```
+
+El número de observaciones es muy elevado, por lo que es normal que no podamos visualizar el detalle de cada observación y su etiqueta. Sin embargo, podremos apreciar la estructura jerárquica del clustering.
+
+Visualmente, podemos seleccionar el número de clúster, por ejemplo:
+
+- Cuatro clústers:
+
+```{r}
+plot(hclust.result, labels=df_labelled_norm$classe) # añadimos etiquetas de classe
+rect.hclust(hclust.result, 4)
+```
+
+- Cinco clústers:
+
+```{r}
+plot(hclust.result, labels=df_labelled_norm$classe) # añadimos etiquetas de classe
+rect.hclust(hclust.result, 5)
+```
+
+- Seis clústers:
+
+```{r}
+plot(hclust.result, labels=df_labelled_norm$classe) # añadimos etiquetas de classe
+rect.hclust(hclust.result, 6)
+```
+
+
+
+Podemos podar el árbol obtenido, limitando el número de clúster "k" o la altura "h".
+Utilizamos la función cutree(), que devuelve un vector con la asignación de cada observación a un clúster.
+
+Probamos con k= 5 clústers
+
+```{r}
+cut_avg <- cutree(hclust.result, k = 5)
+cut_avg[1:10]
+```
+
+Añadimos la información de pertenencia a cada clúster. Contamos el número de instancias en cada clúster
+
+```{r}
+df_norm_hclust <- df_norm %>% mutate(cluster = cut_avg)
+df_norm_hclust %>% count(cluster)
+```
+
+Comprobamos contra las etiquetas de clase:
+
+```{r}
+table(df_norm_hclust$cluster, df_labelled_norm$classe)
+```
+
+Podemos observar que los clústers hallados mediantes técnicas no supervisadas no coinciden con las etiquetas de clase. 
+Recordemos que, mientras que un modelo de clasificación supervisada es entrenado sobre datos etiquetados y su salida corresponde a los valores de las clases aprendidas, los modelos no supervisados no asumen un número de clases a priori. El modelo de clustering jerárquico estudia la distribución de los datos y trata de identificar grupos según una medida dada de distancia.
+
+
+Otra opción es seleccionar variables específicas y realizar el clustering sobre estas variables.
+
+Estudiando la matriz de correlaciones, observamos que las variables "magnet_belt_y", "magnet_belt_z" están correladas con la clase E, mientras que "pitch_forearm" está correlada con la clase D.
+Si seleccionamos estas columnas, podemos estudiar la correspondencia entre el clustering realizado por hclust() y las etiquetas reales
+
+```{r}
+hclust.result <- hclust(dist(df_norm[colnames(df_norm) %in% c("magnet_belt_y", "magnet_belt_z", "pitch_forearm")]),
+                        method="ward.D")
+plot(hclust.result, labels=df_labelled_norm$classe) # añadimos etiquetas de classe
+```
+
+
+Podemos podar el árbol obtenido, limitando el número de clúster "k" o la altura "h".
+Utilizamos la función cutree(), que devuelve un vector con la asignación de cada observación a un clúster.
+
+De nuevo, probamos con k =  5 clusters:
+
+```{r}
+cut_avg <- cutree(hclust.result, k = 5)
+cut_avg[1:10]
+```
+
+Contamos el número de instancias en cada clúster
+```{r}
+df_norm_hclust <- df_norm %>% mutate(cluster = cut_avg)
+df_norm_hclust %>% count(cluster)
+```
+
+Comprobamos contra las etiquetas reales:
+```{r}
+table(df_norm_hclust$cluster, df_labelled_norm$classe)
+```
+
+Sobre el subconjunto de variables seleccionado, el algoritmo de clustering identifica un clúster formado únicamente por observaciones correspondientes a la clase A y un clúster formado por observaciones de las clase D y E. Los demás clusters contienen observaciones de todas las clases.
+
+
+
+## Clustering con K-means (centroid-based clustering)
+
+En esta sección, utilizamos el algoritmo k-means, buscando calcular el mejor clustering a partir de los datos.
+Para determinar el número óptimo de clusters, podemos seguir dos aproximaciones:
+
+- Utilizar la función fviz_nbclust para determinar y visualizar el número óptimo de clústers, usando diferentes métodos: “within-groups sums of squares” (wss) y buscar el “codo” de la curva, average silhouette o gap statistics.
+
+- Usar alguna de las medidas de calidad de clusters, o todas ellas, mediante el paquete NbClust. Podemos pintar el resultado de esta función como un diagrama de barras para verlo gráficamente.
+
+
+### fviz_nbclust
+
+Calculamos el wss y representamos la curva de codo para ver qué número de clusters nos sugiere.
+
+Recordemos que en k=1 existe un único clúster y la wss es máxima, mientras que en k=inf todos los puntos pertenecen a su propio clúster y el wss es cero. La curva desciende rápidamente hasta que el número de clústers alcanza el número de agrupaciones en la distribución de datos. 
+
+> Nota: recuerda que esta metrica se basa en un cambio abrupto en la curva, lo cual es subjetivo.
+
+Observamos que en k=2, k=4 y k=6 se suaviza la caída de manera apreciable. Entre k=8 y k=9 la wss incluso aumenta.
+
+```{r}
+gc() #provoca recolección de basura, liberando memoria
+
+fviz_nbclust(df_norm, kmeans, k.max = 15, method = "wss") +
+  geom_vline(xintercept = 4, linetype = 2)
+
+```
+
+
+Utilizamos ahora el indicador average silhouette. Según esta métrica, el número óptimo de clústers es 14.
+Si nos limitamos a valores de k menores de 8, los valores k=2 y k=5 son los mejores candidatos.
+
+```{r}
+gc() #provoca recolección de basura, liberando memoria
+
+fviz_nbclust(df_norm, kmeans, k.max = 15, method = "silhouette")
+
+```
+
+Los resultados no son definitivos, por lo que pasamos a evaluar múltiples métricas utilizando el paquete NbClust.
+
+
+
+### NbClust
+
+Calculamos el número óptimo de clusters utilizando el paquete NbClust.
+
+NbClust provee 30 índices para determinar el número de clústers y propone al usuario el mejor esquema de clústering.
+Fijamos el mínimo número de clústers a 2 y el máximo número de clústers a 15 (valores por defecto).
+
+Es importante destacar que NbClust consume mucha memoria, y en datasets relativamente grandes como el nuestro la ejecución puede fallar con error "Error: cannot allocate vector of size XX", donde XX es el tamaño del vector. Hemos eliminado los índices que más memoria utilizan y conseguido que la ejecución finalice con éxito. Los índices eliminados son: "silhouette", "ptbiserial", "gap", "frey", "mcclain", "gamma", "gplus", "tau", "hubert".
+
+Como la función NbClust no permite ejecutar un conjunto personalizado de índices (o todos o uno en particular) tendremos que recorrer la lista de índices manualmente y recopilar la información nosotros.
+
+Finalmente, procedemos a mostrar un resumen del número de índices que han escogido cada número de clusters y a representar esta misma información gráficamente.
+
+
+```{r}
+
+gc() #provoca recolección de basura, liberando memoria al reclamar memoria ocupada por objetos que no están ya en uso
+
+
+# indices <- c("kl", "ch", "hartigan", "ccc", "scott", "marriot", "trcovw", "tracew", "friedman", "rubin", "cindex", "db", "silhouette", "duda", "pseudot2", "beale", "ratkowsky", "ball", "ptbiserial", "gap", "frey", "mcclain", "gamma", "gplus", "tau", "dunn", "hubert", "sdindex", "dindex", "sdbw")
+# indices <- c("gamma", "gplus", "tau")
+
+indices <- c("kl", "ch", "hartigan", "ccc", "scott", "marriot", "trcovw", "tracew", "friedman", "rubin", "cindex", "db", "duda", "pseudot2", "beale", "ratkowsky", "ball", "dunn", "sdindex", "dindex", "sdbw")
+
+best_clusters <- rep(0, 15)
+
+for (i in 1:length(indices)) {
+  print(indices[i])
+  nc <- NbClust(df_norm, min.nc=2, max.nc=15, method="kmeans", index=indices[i])
+  best_clusters[nc$Best.nc[1]]=best_clusters[nc$Best.nc[1]]+1
+  print("índice completado")
+}
+print(best_clusters)
+
+par(mfrow = c(1, 1))
+barplot(best_clusters, xlab="Numer of Clusters", ylab="Number of Criteria", main="Number of Clusters Chosen by 21 Criteria", names.arg = 1:15)
+```
+
+Observamos que la mayoría de índices optan por 3 clústers, por lo que tomaremos este valor como referencia.
+
+Calculemos k-means con el número óptimo de clusters: k=3.
+Utilizamos el parámetro nstart para seleccionar el número de veces que el algoritmo debe escoger los centroides iniciales. Esto alivia el problema de inicialización del algoritmo y lo hace más robusto.
+
+```{r}
+nClusters <- 3
+fit.km <- kmeans(df_norm, nClusters, nstart=25)
+
+print(fit.km$centers)
+```
+
+Recordemos que cada observación corresponde a una postura durante la realización del ejercicio.
+Hemos agrupado las posturas en tres grupos, caracterizados por la media de cada variable en ese grupo ("Cluster means")
+
+
+Realizamos un análisis de componentes principales sobre nuestros datos de entrada
+
+```{r}
+pca <- prcomp(df_norm, scale. = T, center = T)
+summary(pca)
+```
+
+Observamos que las dos primeras componentes proporcionan algo más del 30% de la información del conjunto.
+
+Aplicamos una transformación en componentes principales, rotando el espacio de variables originales a las componentes principales. Adicionalmente, añadimos la etiqueta de cada clúster:
+
+```{r}
+new_features <- predict(pca, newdata = df_norm)
+
+pca.dat <- as.data.frame(cbind(new_features, group=fit.km$cluster))
+```
+
+Visualizamos los datos. Para añadir interactividad a los gráficos, usamos la biblioteca ggplotly, que nos permite acceder a información adicional al posicionarnos sobre un punto de interés.
+
+```{r}
+gg2 <- ggplot(pca.dat) +
+  geom_point(aes(x=PC1, y=PC2, col=factor(group), text=rownames(pca.dat)), size=2) +
+  labs(title = "Visualizing K-Means Clusters Against First Two Principal Components") +
+  scale_color_brewer(name="", palette = "Set1")
+
+ggplotly(gg2, tooltip = c("text", "x", "y")) %>%
+  layout(legend = list(x=.9, y=.99))
+```
+
+Observamos que los tres clústers aparecen bien diferenciados.
+
+Aunque el número óptimo de clústers fue k=3, observamos que, proyectando sobre las dos primeras componentes principales, parece que el clúster número uno se podría separar en dos subgrupos.
+
+Podemos incluso representar los datos en 3D, utilizando las tres primeras componentes principales, que proporcionan algo más del 40% de la información del conjunto.
+
+
+```{r}
+
+fig <- plot_ly(x= pca.dat$PC1, y= pca.dat$PC2 , z= pca.dat$PC3, type="scatter3d", mode="markers", color=factor(pca.dat$group), colors=c('red2', 'blue2', 'green3'))
+
+fig <- fig %>% layout(title = 'Visualizing K-Means Clusters Against First Three Principal Components',
+  scene = list(xaxis = list(title = 'PC1'), yaxis = list(title = 'PC2'), zaxis = list(title = 'PC3')))
+
+fig
+
+```
+
+Podemos confirmar que los clúster 1 y 3 tienen puntos cercanos, que pueden ser problemáticos a la hora de ser asignados. Sin embargo, los resultados de k-means son muy buenos.
+
+La representación en 3D nos permite observar un punto perteneciente al clúster 3 muy alejado de los demás puntos, que probablemente debería ser tratado en la fase de preprocesado, ya que puede afectar a la bondad del clustering.
+
+
+
+Por último, podemos estudiar en profundidad el dataset, caracterizando cada clúster según el contexto y objetivo de negocio.
+Para ello, puede ser útil seleccionar las variables originales con mayor relevancia para nuestro problema y estudiar como se distribuyen en cada clúster, calculando sus estadísticos.
+
+También podemos pintar los clusters únicamente con dos coordenadas, por ejemplo:
+
+```{r}
+plot(df_norm[,c(2,5)], col = fit.km$cluster)
+```
+
+y finalmente podemos comparar contra las etiquetas de clase del dataset etiquetado, para entender qué composición de clases tiene cada clúster
+
+```{r}
+df_norm_hclust_label <- as.data.frame(cbind(df_labelled_norm, group=fit.km$cluster))
+
+df_norm_hclust_label %>%
+  group_by(group, classe) %>%
+  count(classe) %>%
+  group_by(group) %>%
+  mutate(classe_perc = round(n/sum(n)*100, 2)) %>%
+  distinct(group, classe, classe_perc)
+```
+
+
+o cómo se reparten las clases en cada grupo
+
+```{r}
+df_norm_hclust_label <- as.data.frame(cbind(df_labelled_norm, group=fit.km$cluster))
+
+
+df_norm_hclust_label %>%
+  group_by(classe, group) %>%
+  count(group) %>%
+  group_by(classe) %>%
+  mutate(group_perc = round(n/sum(n)*100, 2)) %>%
+  distinct(classe, group, group_perc)
+```
+
+Concluímos que los clústers contienen una mezcla de las 5 etiquetas del dataset inicial.
+
+
+
+## Clustering con K-medoids (medoid-based clustering)
+
+Aplicamos ahora el algoritmo K-medoids. En particular, utilizamos dos métodos:
+
+- k-medoids dado el número de clústers óptimo encontrado en la sección anterior
+- k-medoids estimando automáticamente el número de clústers
+
+K-medoids un algoritmo muy similar al k-means. La principal diferencia es que se usa el punto más cercano al
+centroide como representante del cluster, lo que hace que k-medoids sea más robusto que k-means cuando el dataset contiene outliers.
+
+> Nota: medoide es un concepto similar a centroide, pero los medoides siempre están restringidos a ser miembros del conjunto de datos.
+
+Utilizamos PAM (Partition Around Medoids) del paquete cluster.
+Para evaluar el número de clúster, utilizaremos la métrica silhouette. El valor de la anchura de silhouette se interpreta como sigue:
+
+- Valores cercanos a 1 sugieren que la observación se identifica con el clúster asignado
+- Valores cercanos a 0 sugieren que la observación está entre dos clústers
+- Valores cercanos a -1 sugieren que la observación no se identifica con el clúster asignado
+
+La implementación de PAM provee la anchura de silhouette media por clúster y total.
+
+
+### Número de clústers fijado
+
+Calculamos el clustering fijando el número de clusters k=3
+```{r}
+pam.result<-pam(df_norm, k=3)
+```
+
+
+Representamos gráficamente:
+```{r}
+layout(matrix(c(1,2), 1, 2))
+plot(pam.result)
+layout(matrix(1))
+```
+
+
+Observamos que, utilizando k-medoids, el clúster etiquetado como número 2 no está muy diferenciado de los demás.
+El índice de anchura de silhouette indica que el clúster no está bien diferenciado.
+
+Vamos a confirmar este punto.
+Llevamos a cabo un análisis de componentes principales y usamos las dos primeras para visualizar los datos.
+
+```{r}
+#new_features <- predict(pca, newdata = df_norm) #No es necesario volver a ejecutar esta línea, es solo informativa
+
+pca.dat <- as.data.frame(cbind(new_features, group=pam.result$clustering))
+```
+
+Visualizamos los datos. Para añadir interactivdad a los gráficos, usamos la biblioteca ggplotly, que nos permite acceder a información adicional al posicionarnos sobre un punto de interés.
+
+```{r}
+gg2 <- ggplot(pca.dat) +
+  geom_point(aes(x=PC1, y=PC2, col=factor(group), text=rownames(pca.dat)), size=2) +
+  labs(title = "Visualizing K-Means Clusters Against First Two Principal Components") +
+  scale_color_brewer(name="", palette = "Set1")
+
+ggplotly(gg2, tooltip = c("text", "x", "y")) %>%
+  layout(legend = list(x=.9, y=.99))
+```
+
+Podemos incluso representar los datos en 3D, utilizando las tres primeras componentes principales, que proporcionan algo más del 40% de la información del conjunto.
+
+```{r}
+
+fig <- plot_ly(x= pca.dat$PC1, y= pca.dat$PC2 , z= pca.dat$PC3, type="scatter3d", mode="markers", color=factor(pca.dat$group), colors=c('red2', 'blue2', 'green3'))
+
+fig <- fig %>% layout(title = 'Visualizing K-Means Clusters Against First Three Principal Components',
+  scene = list(xaxis = list(title = 'PC1'), yaxis = list(title = 'PC2'), zaxis = list(title = 'PC3')))
+
+fig
+
+```
+
+Efectivamente, confirmamos que el clúster 2 (en azul) se mezcla con el clúster 1 y el clúster 3.
+En el grupo de observaciones del clúster 1 aparece múltiples puntos asignado al clúster 2, y en el grupo de observaciones del clúster 2 aparecen múltiples puntos asignados al clúster 3.
+
+
+
+Podemos probar a ejercutar el modelo de nuevo, fijando el número de clusters k=4
+
+```{r}
+pam.result<-pam(df_norm, k=4)
+```
+
+
+Representamos gráficamente:
+```{r}
+layout(matrix(c(1,2), 1, 2))
+plot(pam.result)
+layout(matrix(1))
+```
+
+Observamos que sigue existiendo mezcla: el índice para los clústers 1 y 3 sigue siendo muy bajo, aunque la media del índice para todos los clústers mejora ligeramente.
+
+
+
+### Cálculo automático del número de clústers
+
+Utilizando pamk, podemos calcular el clustering sin fijar el número de clústers.
+El parámetro krange determina el número de clústers a estimar, por defecto toma el valor de 2 a 10.
+
+```{r}
+pamk.result<-pamk(df_norm, krange=2:10)
+```
+
+Representamos graficamente
+```{r}
+layout(matrix(c(1,2), 1, 2))
+plot(pamk.result$pamobject)
+layout(matrix(1))
+```
+
+El algoritmo determina que k=2 es el número óptimo de clústers.
+Este número probablemente es demasiado pequeño para ser de utilidad real, ya que solo permite clasificar de manera binaria.
+
+
+
+Probemos a fijar el parámetro krange como 3:10, evaluando únicamente un número de clústers entre 3 y 10.
+
+```{r}
+pamk.result<-pamk(df_norm, krange=3:10)
+```
+
+Representamos graficamente
+
+```{r}
+layout(matrix(c(1,2), 1, 2))
+plot(pamk.result$pamobject)
+layout(matrix(1))
+```
+
+En este caso, PAM determina que existen 5 clústers.
+El valor medio de la anchura de silhouette es similar al del caso anterior, aunque podemos ver que el valor del índice para el clúster 5 es bastante bajo.
+
+
+De nuevo, llevamos a cabo un análisis de componentes principales y usamos las dos primeras para visualizar los datos.
+
+```{r}
+#new_features <- predict(pca, newdata = df_norm) #No es necesario volver a ejecutar esta línea, es solo informativa
+
+pca.dat <- as.data.frame(cbind(new_features, group=pamk.result$pamobject$clustering))
+```
+
+Visualizamos los datos. Para añadir interactivdad a los gráficos, usamos la biblioteca ggplotly, que nos permite acceder a información adicional al posicionarnos sobre un punto de interés.
+
+```{r}
+gg2 <- ggplot(pca.dat) +
+  geom_point(aes(x=PC1, y=PC2, col=factor(group), text=rownames(pca.dat)), size=2) +
+  labs(title = "Visualizing K-Means Clusters Against First Two Principal Components") +
+  scale_color_brewer(name="", palette = "Set1")
+
+ggplotly(gg2, tooltip = c("text", "x", "y")) %>%
+  layout(legend = list(x=.9, y=.99))
+```
+
+Podemos incluso representar los datos en 3D, utilizando las tres primeras componentes principales, que proporcionan algo más del 40% de la información del conjunto.
+
+```{r}
+
+fig <- plot_ly(x= pca.dat$PC1, y= pca.dat$PC2 , z= pca.dat$PC3, type="scatter3d", mode="markers", color=factor(pca.dat$group), colors=c('red2', 'blue2', 'green3', 'magenta2', 'orange'))
+
+fig <- fig %>% layout(title = 'Visualizing K-Means Clusters Against First Three Principal Components',
+  scene = list(xaxis = list(title = 'PC1'), yaxis = list(title = 'PC2'), zaxis = list(title = 'PC3')))
+
+fig
+
+```
+
+Observamos que, proyectando sobre las tres primeras componentes principales, la separación de las observaciones en 5 grupos utilizando k-medoids no produce buenos resultados. Observaciones asignadas a distintos clúster se entremezclan y parece que el algoritmo tiene problemas para asignar los puntos correctamente.
+
+Recordemos que estamos proyectando únicamente sobre 3 componentes, que proporcionan alrededor del 40 % de la información, por lo que existe pérdida de información. Sin embargo, después de ejecutar k-medoids con distinto número de clústers, estudiando el índice de silhouette y la proyección sobre las primeras componentes principales para cada uno de los modelos, podemos concluir que, en comparación, k-means produjo mejores resultados sobre nuestro dataset. 
+En nuestro caso, los modelos de clustering basados en centroides funcionan mejor que los modelos basados en medoides.
+
+
+Finalmente podemos estudiar cómo se distribuyen las clases para k-medoids con k=5
+
+```{r}
+df_norm_hclust_label <- as.data.frame(cbind(df_labelled_norm, group=pamk.result$pamobject$clustering))
+
+df_norm_hclust_label %>%
+  group_by(classe, group) %>%
+  count(group) %>%
+  group_by(classe) %>%
+  mutate(group_perc = round(n/sum(n)*100, 2)) %>%
+  distinct(classe, group, group_perc)
+```
+
+De nuevo, cada clúster contiene representantes de todas las clases.
+
+
+## Expectation-Maximization (distribution-based clustering)
+
+En esta sección implementamos el algoritmo Expectation-Maximization (EM).
+Este algoritmo intenta aprender la distribución de los datos de cada conjunto, estudiando:
+
+- La media
+- La desviación de la distribución (normal)
+
+Existentes distintas variantes, en función de los grados de libertad de las distribuciones:
+
+- Deviación típica común (conjuntos esféricos)
+- Matriz de covarianza (conjuntos elipsoidales)
+
+Por último, la pertenencia de un punto a un conjunto se expresa en términos de probabilidad.
+
+
+Utilizamos el paquete Mclust, que implementa el algoritmo EM.
+Permite ajustar distintos tipos de distribuciónes y puede evaluar simultáneamente distintos números de clústers y devolver el más apropiado de acuerdo a una medida.
+
+El parámetro "G" toma un entero o vector de enteros con el número de clústers que desea probar. 
+Por defecto, toma el valor G=1:9 y prueba todos estos modelos
+
+```{r}
+Mclust.result <- Mclust(df_norm) # si no especificas hace 1 a 9 clústers, y todos los posibles modelos
+```
+
+Podemos pintar la gráfica de evolución del BIC (Bayesian Information Criterion) para ver qué modelo se ajusta mejor.
+
+```{r}
+# Notar que la interpretación del BIC en R es al revés de la interp. en Python
+## En R: el más positvo, en Python el más negativo
+plot(Mclust.result, data=df_norm, what="BIC")
+```
+
+
+```{r}
+summary(Mclust.result$BIC)
+```
+
+
+El mejor modelo es VEV (distribución elipsoidal, volumen variable, misma forma, orientación variable) con 9 clústers, aunque los resultados con 7 y 8 clústers también son buenos.
+
+El modelo EEV (distribución elipsoidal, mismo volumen, misma forma, orientación variable) también produce buenos resultados, aunque ligeramente peores que VEV. Los modelos con distribución elipsoidal son los que mejores resultados producen.
+
+
+
+Utilizamos el mejor modelo: VEV con 9 clústers.
+Podemos obtener la asignación de cada observación a uno de los 9 clúster (hard prediction):
+
+```{r}
+head(Mclust.result$classification, 5)
+```
+
+
+o la probabilidad de que cada observación pertenezca a un cluster (soft prediction):
+
+```{r}
+head(round(Mclust.result$z, 2), 5)
+```
+
+
+Podemos visualizar los clusters como una matrix de scatter plot, para cada combinación de variables.
+Por ejemplo, para las 4 primeras columnas:
+
+```{r}
+plot(Mclust.result, dimens = 1:4, what="classification")
+```
+
+También podemos representar la densidad estimada
+
+```{r}
+plot(Mclust.result, dimens = 1:4, what="density")
+```
+
+
+```{r}
+plot(Mclust.result, dimens = 4:5, what = "density", type = "persp")
+```
+
+
+y representar la incertidumbre en la clasificación
+
+```{r}
+plot(Mclust.result, dimens = 1:4, what="uncertainty")
+```
+
+Por último, podemos llevar a cabo un análisis de componentes principales y usar las dos primeras para visualizar los datos. Utilizamos la descomposición realizada en las secciones anteriores
+
+```{r}
+summary(pca)
+```
+
+
+```{r}
+#new_features <- predict(pca, newdata = df_norm) #No es necesario volver a ejecutar esta línea, es solo informativa
+
+pca.dat <- as.data.frame(cbind(new_features, group=Mclust.result$classification))
+```
+
+
+Visualizamos los datos. Para añadir interactividad a los gráficos, usamos la biblioteca ggplotly, que nos permite acceder a información adicional al posicionarnos sobre un punto de interés.
+
+```{r}
+gg2 <- ggplot(pca.dat) +
+  geom_point(aes(x=PC1, y=PC2, col=factor(group), text=rownames(pca.dat)), size=2) +
+  labs(title = "Visualizing K-Means Clusters Against First Two Principal Components") +
+  scale_color_brewer(name="", palette = "Set1")
+
+ggplotly(gg2, tooltip = c("text", "x", "y")) %>%
+  layout(legend = list(x=.9, y=.99))
+```
+
+Como era de esperar, el número de clústers es muy elevado y varios clúster solapan entre sí.
+
+Podemos incluso representar los datos en 3D, utilizando las tres primeras componentes principales, que proporcionan algo más del 40% de la información del conjunto.
+
+
+```{r}
+
+fig <- plot_ly(x= pca.dat$PC1, y= pca.dat$PC2 , z= pca.dat$PC3, type="scatter3d", mode="markers", color=factor(pca.dat$group), colors=c('red2', 'blue2', 'green3', 'magenta3', 'orange', 'yellow', 'brown2', 'pink', 'gray'))
+
+fig <- fig %>% layout(title = 'Visualizing K-Means Clusters Against First Three Principal Components',
+  scene = list(xaxis = list(title = 'PC1'), yaxis = list(title = 'PC2'), zaxis = list(title = 'PC3')))
+
+fig
+
+```
+
+La visualización en 3D permite estudiar más detalles y observar mejor la frontera entre clústers.
+Observamos que los clústers 5 y 6 (naranja y amarillo) están bien diferenciados. Sin embargo, los demás se entremezclan en dos grandes grupos.
+
+
+
+
+
+Por otro lado, es interesante observar que, mientras que el clustering basado en centroides (k-means) estimaba un número óptimo de clústers igual a 3, EM no funciona muy bien sobre este número de clústers.
+
+Podemos estudiar los resultados de EM si fijamos el número de clústers igual a 3:
+
+```{r}
+Mclust.result <- Mclust(df_norm, G=3)
+```
+
+Representamos la gráfica de evolución del BIC (Bayesian Information Criterion) para ver qué modelo se ajusta mejor.
+
+```{r}
+# Notar que la interpretación del BIC en R es al revés de la interp. en Python
+## En R: el más positvo, en Python el más negativo
+plot(Mclust.result, data=df_norm, what="BIC")
+```
+
+
+```{r}
+summary(Mclust.result$BIC)
+```
+
+De nuevo, el mejor modelo es VEV (distribución elipsoidal, volumen variable, misma forma, orientación variable), esta vez con 3 clúster porque así lo hemos forzado.
+
+
+
+Aplicamos PCA
+
+```{r}
+#new_features <- predict(pca, newdata = df_norm) #No es necesario volver a ejecutar esta línea, es solo informativa
+
+pca.dat <- as.data.frame(cbind(new_features, group=Mclust.result$classification))
+```
+
+
+Visualizamos los datos. Para añadir interactividad a los gráficos, usamos la biblioteca ggplotly, que nos permite acceder a información adicional al posicionarnos sobre un punto de interés.
+
+```{r}
+gg2 <- ggplot(pca.dat) +
+  geom_point(aes(x=PC1, y=PC2, col=factor(group), text=rownames(pca.dat)), size=2) +
+  labs(title = "Visualizing K-Means Clusters Against First Two Principal Components") +
+  scale_color_brewer(name="", palette = "Set1")
+
+ggplotly(gg2, tooltip = c("text", "x", "y")) %>%
+  layout(legend = list(x=.9, y=.99))
+```
+
+
+Representamos los datos en 3D, utilizando las tres primeras componentes principales, que proporcionan algo más del 40% de la información del conjunto.
+
+```{r}
+
+fig <- plot_ly(x= pca.dat$PC1, y= pca.dat$PC2 , z= pca.dat$PC3, type="scatter3d", mode="markers", color=factor(pca.dat$group), colors=c('red2', 'blue2', 'green3'))
+
+fig <- fig %>% layout(title = 'Visualizing K-Means Clusters Against First Three Principal Components',
+  scene = list(xaxis = list(title = 'PC1'), yaxis = list(title = 'PC2'), zaxis = list(title = 'PC3')))
+
+fig
+
+```
+
+Concluimos que los resultados de EM para k=3 no son muy buenos, como vimos al estudiar el BIC de modelos con entre 1 a 9 clústers.
+
+Modelos con un número mayor de clústers funcionarán mejor, según el BIC, aunque estudiando el modelo para k=9 vimos que los resultados tampoco eran totalmente satisfactorios. 
+
+
+
+## DBSCAN (Density-based clustering)
+
+En esta última sección implementamos el clustering basado en densidad (DBSCAN).
+Este tipo de métodos se basa en la premisa de que los clúster son zonas de **alta densidad** de puntos separadas por zonas de **baja densidad** de puntos.
+
+Esto permite que puedan identificar clúster de forma arbitaria y que trabajen bien en presencia de ruido.
+
+
+Utilizaremos el paquete dbscan para implementar este algoritmo. Primero, debemos escoger los valores para los parámetros MinPts y eps. Habitualmente, se suele probar con varios valores de MinPts y pintar la curva de codo para los k-vecinos de cada punto ordenados y se selecciona eps como la altura a la que se produce un cambio en la pendiente de la curva (aproximadamente, puede ser necesario hacer pequeños ajustes).
+
+Utilizaremos la función kNNdistplot para representar este tipo de curva, que recibe como argumento el dataset y el número de vecinos (k) que queremos probar. Para hacer más fácil la obtención del valor de cambio de pendiente, podemos probar a pintar varias líneas horizontales con la función abline a distintas alturas.
+
+El valor de k, como se ha dicho anteriormente, podemos hacerlo variar, aunque muchas veces se suele escoger el número de variables más una.
+
+Una vez escogido el valor de los parámetros, podemos probar a realizar el clustering y comprobar, mediante su visualización, si los distintos conjuntos de puntos son detectados correctamente.
+
+Procedemos a pintar la curva de codo y a pintar un par de líneas de referencia para intentar ajustar el punto de corte. Nuestro dataset (sin la etiqueta de clase) tiene 52 columnas, por lo que probamos k=52+1
+
+```{r}
+kNNdistplot(df_norm, k = 53)
+
+abline(h=1, col="green")
+```
+
+Seleccionamos el punto de corte y ejecutamos el clustering.
+
+```{r}
+db <- dbscan(df_norm, eps=1, minPts=53)
+```
+
+Mostramos un resumen del objeto devuelto tras hacer el clustering.
+
+```{r}
+str(db)
+```
+
+El modelo diferencia 4 clústers:
+
+```{r}
+unique(db$cluster)
+```
+
+
+Representamos los resultados, para observar que el clustering captura razonablemente bien la mayoría de los puntos en clusters bien diferenciados.
+
+```{r}
+plot(df_norm[1:5], col=db$cluster+1L)
+```
+
+
+También podemos llevar a cabo un análisis de componentes principales y usar las dos primeras para visualizar los datos. Utilizamos la descomposición realizada en las secciones anteriores
+
+```{r}
+summary(pca)
+```
+
+
+```{r}
+#new_features <- predict(pca, newdata = df_norm) #No es necesario volver a ejecutar esta línea, es solo informativa
+
+pca.dat <- as.data.frame(cbind(new_features, group=db$cluster))
+```
+
+
+Visualizamos los datos. Para añadir interactividad a los gráficos, usamos la biblioteca ggplotly, que nos permite acceder a información adicional al posicionarnos sobre un punto de interés.
+
+```{r}
+gg2 <- ggplot(pca.dat) +
+  geom_point(aes(x=PC1, y=PC2, col=factor(group), text=rownames(pca.dat)), size=2) +
+  labs(title = "Visualizing K-Means Clusters Against First Two Principal Components") +
+  scale_color_brewer(name="", palette = "Set1")
+
+ggplotly(gg2, tooltip = c("text", "x", "y")) %>%
+  layout(legend = list(x=.9, y=.99))
+```
+
+Observamos que la mayoría de puntos están asignados a los clústers 1, 2 y 3; que están bien diferenciados.
+El clúster 0 parece estar formado por muy pocos puntos, que en ocasiones se entremezclan con los puntos de otros clústers.
+
+Representamos los datos en 3D, utilizando las tres primeras componentes principales, que proporcionan algo más del 40% de la información del conjunto.
+
+
+```{r}
+
+fig <- plot_ly(x= pca.dat$PC1, y= pca.dat$PC2 , z= pca.dat$PC3, type="scatter3d", mode="markers", color=factor(pca.dat$group), colors=c('red2', 'blue2', 'green3'))
+
+fig <- fig %>% layout(title = 'Visualizing K-Means Clusters Against First Three Principal Components',
+  scene = list(xaxis = list(title = 'PC1'), yaxis = list(title = 'PC2'), zaxis = list(title = 'PC3')))
+
+fig
+```
+
+Efectivamente, confirmamos que el clúster 0 no está bien diferenciado de los demás grupos.
+
+
+Volvamos a la curva de codo de los k-vecinos.
+Seleccionamos un punto de corte ligeramente mayor, eps= 1.05, y ejecutamos el clustering.
+
+```{r}
+db <- dbscan(df_norm, eps=1.05, minPts=53)
+```
+
+Mostramos un resumen del objeto devuelto tras hacer el clustering.
+
+```{r}
+str(db)
+```
+
+De nuevo, el modelo diferencia 4 clústers:
+
+```{r}
+unique(db$cluster)
+```
+
+Llevamos a cabo un análisis de componentes principales y usamos las dos primeras para visualizar los datos.
+Utilizamos la descomposición realizada en las secciones anteriores.
+
+```{r}
+#new_features <- predict(pca, newdata = df_norm) #No es necesario volver a ejecutar esta línea, es solo informativa
+
+pca.dat <- as.data.frame(cbind(new_features, group=db$cluster))
+```
+
+Visualizamos los datos. Para añadir interactividad a los gráficos, usamos la biblioteca ggplotly, que nos permite acceder a información adicional al posicionarnos sobre un punto de interés.
+
+```{r}
+gg2 <- ggplot(pca.dat) +
+  geom_point(aes(x=PC1, y=PC2, col=factor(group), text=rownames(pca.dat)), size=2) +
+  labs(title = "Visualizing K-Means Clusters Against First Two Principal Components") +
+  scale_color_brewer(name="", palette = "Set1")
+
+ggplotly(gg2, tooltip = c("text", "x", "y")) %>%
+  layout(legend = list(x=.9, y=.99))
+```
+
+Podemos representar los datos en 3D, utilizando las tres primeras componentes principales, que proporcionan algo más del 40% de la información del conjunto.
+
+```{r}
+
+fig <- plot_ly(x= pca.dat$PC1, y= pca.dat$PC2 , z= pca.dat$PC3, type="scatter3d", mode="markers", color=factor(pca.dat$group), colors=c('red2', 'blue2', 'green3'))
+
+fig <- fig %>% layout(title = 'Visualizing K-Means Clusters Against First Three Principal Components',
+  scene = list(xaxis = list(title = 'PC1'), yaxis = list(title = 'PC2'), zaxis = list(title = 'PC3')))
+
+fig
+```
+
+Los resultados mejoran apreciablemente.
+
+Los clúster 1, 2 y 3 siguen estando bien diferenciados, mientras que el clúster 0 está ahora mejor definido.
+En la proyección sobre las tres primeras componentes principales, el clúster 0 solamente se mezcla con el clúster 1, y observamos que incluye puntos atípicos y puntos situados entre clústers.
+
+
+
+# Conclusión
+
+En este análisis hemos utilizado técnicas no supervisadas para construir y evaluar modelos de segmentación que intenten capturar la estructura de grupos existentes en el conjunto de datos estudiado.
+
+En particular, hemos explorado los siguientes modelos:
+
+- Clustering Jerárquico (agglomerative clustering)
+- Clustering con K-means (centroid-based clustering)
+- Clustering con K-medoids (medoid-based clustering)
+- Expectation-Maximization (distribution-based clustering)
+- DBSCAN (Density-based clustering)
+
+Hemos analizado los resultados de cada modelo utilizando técnicas visuales (representación gráfica de índices de calidad del modelo, visualización de los clusters sobre las variables originales, reducción de dimensionalidad y proyección sobre componentes principales) y cuantitativas (cálculo y comparación de índices de calidad del modelo, evaluación contra etiquetas supervisadas).
+
+El modelo **K-means** con 3 clústers ha sido el que mejores resultados ha dado, y por tanto el que implementaríamos en un caso real. 
+
+El modelo DBSCAN con eps=1.05 y minPts=53 también ha producido buenos resultados. El modelo ha identificado cuatro clústers, tres de ellos bien definidos y con una alta densidad de puntos y uno de ellos formado por un bajo número de puntos que, en ocasiones, se mezcla con otros clústers.
+
+Los modelos K-medoids y EM no han producido buenos resultados. Estos modelos han sido explorados utilizando distintos parámetros. En todos los casos estudiados, la evaluación de sus resultados no fue favorable.
+
+Por último, los modelos aglomerativos de clustering han sido utilizados para explorar los datos y analizar posibles grupos en ellos.
+
+
+Concluir que, en un análisis real en el que podamos aplicar reglas de negocio o del área específica de estudio, utilizaríamos la información obtenida para caracterizar y segmentar en grupos de interés. Estas técnicas también pueden ser utilizadas para extraer conocimiento de los datos, como fase previa de un análisis supervisado.
+
