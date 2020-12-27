@@ -12,3 +12,11 @@ The objective of this project is to analyse the data collected and implement the
 - Supervised learning: develop a predictive model that predicts the posture during the excercise based on the data collected. Compare and evaluate different models.
 
 Python & R are used to develop the project.
+
+<p align="left">
+  <img src="./images/PythonLogo.png" alt="Size Limit CLI" width="350">
+</p>
+
+<p align="left">
+  <img src="./images/RLogo.png" alt="Size Limit CLI" width="125">
+</p>
